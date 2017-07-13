@@ -1,5 +1,6 @@
 extern crate svd_parser;
 
+use std::path::Path;
 use std::collections::BTreeMap;
 use std::env::args;
 use std::fs::File;
@@ -7,30 +8,62 @@ use std::io;
 
 fn main() {
     let devices = load_devices().expect("failed to parse input files");
-    let peripherals = devices.into_iter()
-        .flat_map(|svd_parser::Device { defaults, peripherals, .. }| {
-            peripherals.into_iter()
-                .flat_map(move |peripheral| {
-                    let name = peripheral.group_name.unwrap_or(peripheral.name);
-                    peripheral.registers.map(move |registers|
-                        Ok((Peripheral::new(registers, &defaults)?, name))
-                    )
+    let mut sets = BTreeMap::new();
+    let peripherals = devices
+        .into_iter()
+        .flat_map(
+            |(
+                svd_parser::Device {
+                    defaults,
+                    peripherals,
+                    ..
+                },
+                file,
+            )| {
+                peripherals.into_iter().flat_map(move |peripheral| {
+                    let file = file.clone();
+                    let name = peripheral.name;
+                    peripheral.registers.map(move |registers| {
+                        let file = file.clone();
+                        Ok((
+                            Peripheral::new(registers, &defaults)?,
+                            format!("{}:{}", file, name)
+                        ))
+                    })
                 })
-        })
-        .collect::<Result<BTreeMap<Peripheral, String>, String>>()
+            },
+        )
+        .collect::<Result<Vec<(Peripheral, String)>, String>>()
         .unwrap();
-    for (_, name) in peripherals {
-        println!("{}", name);
+    for (p, v) in peripherals {
+        if !sets.contains_key(&p) {
+            sets.insert(p, vec![v]);
+            continue;
+        }
+
+        sets.get_mut(&p).unwrap().push(v);
     }
+    println!("{:#?}", sets.values());
+    println!("{}", sets.values().len());
 }
 
-fn load_devices() -> io::Result<Vec<svd_parser::Device>> {
-    args().skip(1).map(|filename| {
-        use std::io::Read;
-        let mut xml = String::new();
-        File::open(filename)?.read_to_string(&mut xml)?;
-        Ok(svd_parser::parse(xml.as_ref()))
-    }).collect()
+fn load_devices() -> io::Result<Vec<(svd_parser::Device, String)>> {
+    args()
+        .skip(1)
+        .map(|path| {
+            use std::io::Read;
+            let mut xml = String::new();
+            File::open(&path)?.read_to_string(&mut xml)?;
+            Ok((
+                svd_parser::parse(xml.as_ref()),
+                Path::new(&path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ))
+        })
+        .collect()
 }
 
 #[derive(Ord, Eq, PartialOrd, PartialEq)]
@@ -81,11 +114,16 @@ struct Field {
 }
 
 impl Field {
-    pub fn new(field: svd_parser::Field, default_access: Option<svd_parser::Access>) -> Result<Field, String> {
+    pub fn new(
+        field: svd_parser::Field,
+        default_access: Option<svd_parser::Access>,
+    ) -> Result<Field, String> {
         Ok(Field {
             name: field.name.clone(),
             bit_range: field.bit_range.into(),
-            access: field.access.or(default_access)
+            access: field
+                .access
+                .or(default_access)
                 .ok_or_else(|| format!("missing access for {}", field.name))?
                 .into(),
         })
@@ -98,13 +136,11 @@ struct RegisterInfo {
     pub name: String,
 
     // ignore description
-
     pub address_offset: u32,
 
     pub size: u32,
 
     // access is pushed down into individual fields
-
     pub reset_value: u32,
 
     pub reset_mask: u32,
@@ -116,26 +152,34 @@ struct RegisterInfo {
 }
 
 impl RegisterInfo {
-    pub fn new(register: svd_parser::RegisterInfo, defaults: &svd_parser::Defaults) -> Result<RegisterInfo, String> {
+    pub fn new(
+        register: svd_parser::RegisterInfo,
+        defaults: &svd_parser::Defaults,
+    ) -> Result<RegisterInfo, String> {
         let name = register.name;
         let default_access = register.access.or(defaults.access);
         Ok(RegisterInfo {
             name: name.clone(),
             address_offset: register.address_offset,
-            size: register.size.or(defaults.size)
+            size: register
+                .size
+                .or(defaults.size)
                 .ok_or_else(|| format!("missing size in {}", name))?,
-            reset_value: register.reset_value.or(defaults.reset_value)
+            reset_value: register
+                .reset_value
+                .or(defaults.reset_value)
                 .ok_or_else(|| format!("missing reset value in {}", name))?,
-            reset_mask: register.reset_mask.or(defaults.reset_mask)
+            reset_mask: register
+                .reset_mask
+                .or(defaults.reset_mask)
                 .ok_or_else(|| format!("missing reset mask in {}", name))?,
             fields: match register.fields {
-                    Some(fields) => Some(
-                        fields.into_iter()
-                            .map(|field| Field::new(field, default_access))
-                            .collect::<Result<Vec<Field>, String>>()?
-                    ),
-                    None => None,
-                },
+                Some(fields) => Some(fields
+                    .into_iter()
+                    .map(|field| Field::new(field, default_access))
+                    .collect::<Result<Vec<Field>, String>>()?),
+                None => None,
+            },
         })
     }
 }
@@ -145,12 +189,21 @@ impl RegisterInfo {
 struct Peripheral(Vec<RegisterInfo>);
 
 impl Peripheral {
-    pub fn new(registers: Vec<svd_parser::Register>, defaults: &svd_parser::Defaults) -> Result<Peripheral, String> {
-        registers.into_iter()
-            .map(|register| RegisterInfo::new(match register {
-                svd_parser::Register::Single(info) => info,
-                svd_parser::Register::Array(info, _) => info,
-            }, defaults))
+    pub fn new(
+        registers: Vec<svd_parser::Register>,
+        defaults: &svd_parser::Defaults,
+    ) -> Result<Peripheral, String> {
+        registers
+            .into_iter()
+            .map(|register| {
+                RegisterInfo::new(
+                    match register {
+                        svd_parser::Register::Single(info) => info,
+                        svd_parser::Register::Array(info, _) => info,
+                    },
+                    defaults,
+                )
+            })
             .collect::<Result<Vec<RegisterInfo>, String>>()
             .map(Peripheral)
     }
