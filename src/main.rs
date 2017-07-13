@@ -27,7 +27,7 @@ fn main() {
                         let file = file.clone();
                         Ok((
                             Peripheral::new(registers, &defaults)?,
-                            format!("{}:{}", file, name)
+                            format!("{}:{}", name, file)
                         ))
                     })
                 })
@@ -43,8 +43,13 @@ fn main() {
 
         sets.get_mut(&p).unwrap().push(v);
     }
-    println!("{:#?}", sets.values());
-    println!("{}", sets.values().len());
+    for p in sets.values() {
+        print!("{}", p.len());
+        for source in p {
+            print!("\t{}", source);
+        }
+        println!("");
+    }
 }
 
 fn load_devices() -> io::Result<Vec<(svd_parser::Device, String)>> {
